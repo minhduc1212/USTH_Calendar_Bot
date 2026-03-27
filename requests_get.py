@@ -43,7 +43,7 @@ for course in calendar_data:
 
     if schedules:
         class_id = course.get('classId', 'Không xác định')
-        print(f"\n📚 Môn học: {course_name} (Lớp: {class_id})")
+        print(f"\nMôn học: {course_name} (Lớp: {class_id})")
         
         for schedule in schedules:
             place = schedule.get('place') or 'Chưa rõ'

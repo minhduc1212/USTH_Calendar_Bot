@@ -34,7 +34,7 @@ def get_timetable_data():
     with sync_playwright() as p:
         browser = p.chromium.launch_persistent_context(
             user_data_dir="./usth_profile", 
-            headless=True, 
+            headless=False, # Hiển thị trình duyệt để xem tự động click đăng nhập
             args=["--disable-blink-features=AutomationControlled"]
         )
         
@@ -44,7 +44,24 @@ def get_timetable_data():
         page.goto(PAGE_URL)
 
         print("⏳ Đang chờ dữ liệu...")
-        print("👉 LƯU Ý: Nếu trình duyệt yêu cầu đăng nhập Google, hãy tự đăng nhập. Code sẽ kiên nhẫn chờ tối đa 1 phút.")
+        
+        #auto sign in
+        try:
+            # Chờ 5 giây xem có nút chứa chữ "Google" không (ở trang đăng nhập của trường)
+            page.wait_for_selector("text=/Gmail/i", timeout=5000)
+            print("🔄 Phát hiện trang đăng nhập! Đang tự động bấm chọn đăng nhập 'Google'...")
+            page.locator("text=/Gmail/i").first.click()
+            
+            page.wait_for_selector("[data-email]", timeout=10000)
+            email_el = page.locator("[data-email]").first
+            email_name = email_el.get_attribute("data-email")
+            print(f"🔄 Đang tự động chọn tài khoản Gmail: {email_name} ...")
+            email_el.click()
+        except Exception:
+            pass
+        # -------------------------------------------------
+
+        print("👉 Đang chờ bắt API dữ liệu (Chờ tối đa 1 phút)...")
 
         timetable_data = None
 

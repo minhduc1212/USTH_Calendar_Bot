@@ -47,6 +47,15 @@ def get_timetable_data():
         
         #auto sign in
         try:
+            #wait 2 sec for "Đăng nhập" button to appear
+            page.wait_for_selector("text=/Đăng nhập/i", timeout=2000)
+            print("🔄 Phát hiện trang đăng nhập! Đang tự động bấm đăng nhập...")
+            page.locator("text=/Đăng nhập/i").first.click()
+        except Exception:
+            pass
+        
+        try:
+
             # Chờ 5 giây xem có nút chứa chữ "Google" không (ở trang đăng nhập của trường)
             page.wait_for_selector("text=/Gmail/i", timeout=5000)
             print("🔄 Phát hiện trang đăng nhập! Đang tự động bấm chọn đăng nhập 'Google'...")
@@ -59,7 +68,6 @@ def get_timetable_data():
             email_el.click()
         except Exception:
             pass
-        # -------------------------------------------------
 
         print("👉 Đang chờ bắt API dữ liệu (Chờ tối đa 1 phút)...")
 

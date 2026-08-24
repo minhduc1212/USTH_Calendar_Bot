@@ -60,7 +60,7 @@ def get_timetable_data():
             page.wait_for_selector("text=/Gmail/i", timeout=5000)
             print("🔄 Phát hiện trang đăng nhập! Đang tự động bấm chọn đăng nhập 'Google'...")
             page.locator("text=/Gmail/i").first.click()
-            
+                
             page.wait_for_selector("[data-email]", timeout=10000)
             email_el = page.locator("[data-email]").first
             email_name = email_el.get_attribute("data-email")

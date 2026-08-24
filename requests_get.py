@@ -1,58 +1,178 @@
 import json
+import base64
+import hashlib
+import os
+import sys
 from datetime import datetime
 import requests
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
+
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
+# ================= CẤU HÌNH MÃ HÓA TỪ HỆ THỐNG ERP =================
+# Các hằng số được trích xuất từ source JavaScript của hệ thống ERP USTH
+E_N = "304c7f6dff373663d32879ac1c1f1318"
+E_C = "069635c0806598e069583aee5440e448"
+
+# Key = SHA256(E_N), IV = MD5(E_C)
+AES_KEY = hashlib.sha256(E_N.encode('utf-8')).digest()
+AES_IV = hashlib.md5(E_C.encode('utf-8')).digest()
 
 
-headers = {
-    "accept": "application/json",
-    "accept-encoding": "gzip, deflate",
-    "accept-language": "en-US,en;q=0.9,vi;q=0.8",
-    "Content-type": "application/json",
-    "Cookie": "_ga_DMHDSY29QY=GS2.1.s1770899438$o6$g1$t1770899558$j60$l0$h0; _ga=GA1.1.2040301921.1768664475; language=vi; _ga_CWFTHLQHPT=GS2.1.s1774321153$o5$g0$t1774321156$j57$l0$h0; JSESSIONID=aCEzFaYmgEJNPnRCSYUqkg.node0; token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3NzQ5MjU5ODQsImVtYWlsIjoiZHVjbm0uMjNiYTE0MDU2QHVzdGguZWR1LnZuIn0.EfzQSX-VFtMKj1gxqLUYFIM4DGeD5Owt1hzSGrVnx4s; soict-session-id=7C4FF215-7770-431A-BC1F-A4B5B73E8537-1774321184461_1774321184461; x-student-portal-token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoiOGg3b294M3ByQzJyYWJzSTF5MFoyVkRzb2cyR29QQ0UvZG5VakxBMkVVQzBkZmtETVNocW5lVjd0d2dkWkRqeTc1am5MRThkZVB6M3Nvc3hLTzBpekJHb24raVc0TERhK3JBdFpwVkcwQTFVcktSbVIyQUNXL3UyU2dQUmtEelMiLCJpYXQiOjE3NzQzMjExODcsImV4cCI6MTc3NDQwNzU4N30.XDe8RY4o4WHtiC5tf0UPGnTHlC9n6ZYQFrkf3PL66oQ; _ga_0Q453EM71J=GS2.1.s1774320702$o85$g1$t1774321584$j60$l0$h0",
-    "origin": "https://erp.usth.edu.vn",
-    "priority": "u=1, i",
-    "Referer": "https://erp.usth.edu.vn/students/learn/timetable",
-    "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-    "x-check-sum": "c92426d0028f06515a587fef8c4e7cc1ca55e4c25f6c7890701d2812799ea83a"
-}
+def encrypt_payload(data: dict) -> str:
+    """Mã hóa payload dạng dict thành chuỗi base64 AES-CBC PKCS7."""
+    json_str = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
+    padder = padding.PKCS7(128).padder()
+    padded_data = padder.update(json_str.encode('utf-8')) + padder.finalize()
+    cipher = Cipher(algorithms.AES(AES_KEY), modes.CBC(AES_IV))
+    encryptor = cipher.encryptor()
+    ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+    return base64.b64encode(ciphertext).decode('utf-8')
 
-payload = {
-    "fromTime": 1771779600000,
-    "toTime": 1775408399999,
-    "semester": "20252",
-    "weeks": [30, 31, 32, 33, 34, 35]
-}
 
-response = requests.post('https://erp.usth.edu.vn/student-services/api/v2/timetables/query-student-timetable-in-range', headers=headers, json=payload)
+def decrypt_payload(payload_b64: str):
+    """Giải mã chuỗi base64 AES-CBC PKCS7 trả về từ server thành object JSON."""
+    cipher_bytes = base64.b64decode(payload_b64)
+    cipher = Cipher(algorithms.AES(AES_KEY), modes.CBC(AES_IV))
+    decryptor = cipher.decryptor()
+    padded = decryptor.update(cipher_bytes) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    decrypted = unpadder.update(padded) + unpadder.finalize()
+    return json.loads(decrypted.decode('utf-8'))
 
-if response.status_code == 200:
-    calendar_data = response.json()
-else:
-    print("Failed to retrieve timetable data")
-    exit()
 
-for course in calendar_data:
-    course_name = course.get('courseName') or 'Không xác định'
-    schedules = course.get('_calendars', [])
+def calculate_checksum(body: dict) -> str:
+    """Tính toán giá trị header x-check-sum theo thuật toán của ERP."""
+    if not isinstance(body, dict):
+        return ""
+    # Lọc các trường kiểu nguyên thủy (loại bỏ array/object theo thuật toán frontend)
+    filtered = {
+        k: v for k, v in body.items()
+        if v is None or isinstance(v, (str, int, float, bool))
+    }
+    sorted_dict = {k: filtered[k] for k in sorted(filtered.keys())}
+    json_str = json.dumps(sorted_dict, separators=(',', ':'), ensure_ascii=False)
+    serialized = json.dumps(json_str, ensure_ascii=False)
+    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
 
-    if schedules:
-        class_id = course.get('classId', 'Không xác định')
-        print(f"\nMôn học: {course_name} (Lớp: {class_id})")
+
+def get_cookies():
+    """Lấy cookies từ usth_profile (nếu có playwright) hoặc dùng cookies cấu hình sẵn."""
+    if os.path.exists("./usth_profile"):
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                browser = p.chromium.launch_persistent_context(
+                    user_data_dir="./usth_profile",
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"]
+                )
+                cookies_list = browser.cookies(["https://erp.usth.edu.vn"])
+                browser.close()
+                return {c['name']: c['value'] for c in cookies_list}
+        except Exception as e:
+            print(f"Không thể đọc cookies tự động từ profile ({e}), chuyển sang cookies thủ công.")
+    
+    # Cookie thủ công dự phòng nếu không dùng browser profile
+    return {
+        "token": "YOUR_TOKEN_HERE",
+        "soict-session-id": "YOUR_SOICT_SESSION_ID_HERE",
+        "x-student-portal-token": "YOUR_PORTAL_TOKEN_HERE",
+        "x-access-token": "YOUR_ACCESS_TOKEN_HERE"
+    }
+
+
+def fetch_timetable(from_time: int, to_time: int, semester: str, weeks: list):
+    """Gửi request lấy thời khóa biểu bằng requests với payload đã mã hóa."""
+    cookies = get_cookies()
+    
+    body = {
+        "fromTime": from_time,
+        "toTime": to_time,
+        "semester": semester,
+        "weeks": weeks
+    }
+    
+    checksum = calculate_checksum(body)
+    encrypted_payload = encrypt_payload(body)
+    request_data = {"payload": encrypted_payload}
+    
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+        "origin": "https://erp.usth.edu.vn",
+        "Referer": "https://erp.usth.edu.vn/students/learn/timetable",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        "x-check-sum": checksum
+    }
+    
+    url = "https://erp.usth.edu.vn/student-services/api/v2/timetables/query-student-timetable-in-range"
+    
+    print("⏳ Đang gửi request lấy thời khóa biểu...")
+    response = requests.post(url, headers=headers, json=request_data, cookies=cookies)
+    
+    if response.status_code != 200:
+        print(f"❌ Lỗi khi tải dữ liệu. HTTP Status: {response.status_code}")
+        print("Response:", response.text)
+        return None
+    
+    res_json = response.json()
+    if isinstance(res_json, dict) and "payload" in res_json:
+        data = decrypt_payload(res_json["payload"])
+        return data
+    return res_json
+
+
+def display_timetable(calendar_data):
+    """In danh sách lịch học ra console."""
+    if not calendar_data:
+        print("Không có dữ liệu thời khóa biểu.")
+        return
+
+    print(f"\n✅ Lấy thành công dữ liệu ({len(calendar_data)} môn học / lớp).")
+    
+    for course in calendar_data:
+        course_name = course.get('courseName') or 'Không xác định'
+        schedules = course.get('_calendars', [])
+
+        if schedules:
+            class_id = course.get('classId', 'Không xác định')
+            print(f"\nMôn học: {course_name} (Lớp: {class_id})")
+            
+            for schedule in schedules:
+                place = schedule.get('place') or 'Chưa rõ'
+                teacher_names = schedule.get('teacherNames')
+                teachers = ", ".join(teacher_names) if teacher_names else 'Chưa phân công'
+                
+                # Chuyển đổi timestamp sang ngày tháng
+                date_timestamp = schedule.get('date', 0) / 1000.0
+                date_str = datetime.fromtimestamp(date_timestamp).strftime('%d/%m/%Y')
+                
+                print(f"  - Thứ {schedule.get('day')}, ngày {date_str} (Tiết {schedule.get('from')} - {schedule.get('to')})")
+                print(f"    Nơi học: {place} | Giảng viên: {teachers}")
+
+
+if __name__ == "__main__":
+    # Ví dụ khoảng thời gian truy vấn
+    # Kỳ học 20261 (hoặc kỳ hiện tại bạn muốn lấy)
+    data = fetch_timetable(
+        from_time=1785085200000,
+        to_time=1788713999999,
+        semester="20261",
+        weeks=[1, 2, 3, 4, 5]
+    )
+    
+    if data:
+        # Lưu vào file timetable.json
+        with open("timetable.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        print("📁 Đã lưu dữ liệu vào file 'timetable.json'.")
         
-        for schedule in schedules:
-            place = schedule.get('place') or 'Chưa rõ'
-            teacher_names = schedule.get('teacherNames')
-            teachers = ", ".join(teacher_names) if teacher_names else 'Chưa phân công'
-            
-            #change to date and time
-            date_timestamp = schedule.get('date', 0) / 1000.0
-            date_str = datetime.fromtimestamp(date_timestamp).strftime('%d/%m/%Y')
-            
-            print(f"  - Thứ {schedule.get('day')}, ngày {date_str} (Tiết {schedule.get('from')} - {schedule.get('to')})")
-            print(f"    Nơi học: {place} | Giảng viên: {teachers}")
+        # In ra màn hình
+        display_timetable(data)

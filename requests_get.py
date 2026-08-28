@@ -88,7 +88,30 @@ def get_cookies():
     }
 
 
-def fetch_timetable(from_time: int, to_time: int, semester: str, weeks: list):
+def refresh_session_cookies():
+    """Mở trang timetable trong profile để tự động refresh token/session cookies qua SSO callback."""
+    if not os.path.exists("./usth_profile"):
+        return None
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch_persistent_context(
+                user_data_dir="./usth_profile",
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"]
+            )
+            page = browser.new_page()
+            page.goto("https://erp.usth.edu.vn/students/learn/timetable", timeout=20000)
+            page.wait_for_timeout(3000)
+            cookies_list = browser.cookies(["https://erp.usth.edu.vn"])
+            browser.close()
+            return {c['name']: c['value'] for c in cookies_list}
+    except Exception as e:
+        print(f"⚠️ Không thể tự động làm mới session qua profile: {e}")
+        return None
+
+
+def fetch_timetable(from_time: int, to_time: int, semester: str, weeks: list, auto_retry: bool = True):
     """Gửi request lấy thời khóa biểu bằng requests với payload đã mã hóa."""
     cookies = get_cookies()
     
@@ -118,8 +141,27 @@ def fetch_timetable(from_time: int, to_time: int, semester: str, weeks: list):
     response = requests.post(url, headers=headers, json=request_data, cookies=cookies)
     
     if response.status_code != 200:
+        # Cố gắng giải mã response payload nếu server trả về payload mã hóa
+        err_detail = response.text
+        try:
+            res_json = response.json()
+            if isinstance(res_json, dict) and "payload" in res_json:
+                err_detail = json.dumps(decrypt_payload(res_json["payload"]), ensure_ascii=False)
+        except Exception:
+            pass
+
         print(f"❌ Lỗi khi tải dữ liệu. HTTP Status: {response.status_code}")
-        print("Response:", response.text)
+        print(f"Chi tiết lỗi: {err_detail}")
+        
+        # Tự động refresh cookie nếu gặp 401 (Invalid Token / Session expired)
+        if response.status_code == 401 and auto_retry and os.path.exists("./usth_profile"):
+            print("🔄 Phát hiện Token/Session hết hạn. Đang tự động làm mới session qua trình duyệt...")
+            refreshed_cookies = refresh_session_cookies()
+            if refreshed_cookies:
+                print("✅ Đã làm mới session thành công. Đang thử gửi lại request...")
+                return fetch_timetable(from_time, to_time, semester, weeks, auto_retry=False)
+            else:
+                print("👉 Vui lòng chạy lại 'python playwright_get.py' để đăng nhập lại tài khoản.")
         return None
     
     res_json = response.json()

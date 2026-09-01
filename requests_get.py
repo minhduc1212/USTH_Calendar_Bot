@@ -3,6 +3,7 @@ import base64
 import hashlib
 import os
 import sys
+import time
 from datetime import datetime
 import requests
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -88,33 +89,113 @@ def get_cookies():
     }
 
 
-def refresh_session_cookies():
-    """Mở trang timetable trong profile để tự động refresh token/session cookies qua SSO callback."""
+def refresh_session_cookies(interactive: bool = True):
+    """Mở trang timetable trong profile để tự động refresh token/session cookies qua SSO callback.
+    Nếu Google yêu cầu nhập mật khẩu/xác thực 2 bước, có thể mở trình duyệt (headless=False) để người dùng đăng nhập.
+    """
     if not os.path.exists("./usth_profile"):
         return None
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch_persistent_context(
-                user_data_dir="./usth_profile",
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"]
-            )
-            page = browser.new_page()
-            page.goto("https://erp.usth.edu.vn/students/learn/timetable", timeout=20000)
-            page.wait_for_timeout(3000)
-            cookies_list = browser.cookies(["https://erp.usth.edu.vn"])
-            browser.close()
-            return {c['name']: c['value'] for c in cookies_list}
-    except Exception as e:
-        print(f"⚠️ Không thể tự động làm mới session qua profile: {e}")
-        return None
+
+    from playwright.sync_api import sync_playwright
+
+    def _attempt_sso(headless: bool):
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch_persistent_context(
+                    user_data_dir="./usth_profile",
+                    headless=headless,
+                    args=["--disable-blink-features=AutomationControlled"]
+                )
+                page = browser.pages[0] if browser.pages else browser.new_page()
+
+                try:
+                    page.goto("https://erp.usth.edu.vn/students/learn/timetable", timeout=30000)
+                except Exception as e:
+                    print(f"⚠️ Không thể kết nối tới trang ERP: {e}")
+                    browser.close()
+                    return None
+
+                page.wait_for_timeout(3000)
+
+                # Kiểm tra nếu trang đang ở trang đăng nhập SSO
+                if "sso/login" in page.url or page.locator("button.gmail").is_visible():
+                    try:
+                        print("🔄 Phát hiện trang đăng nhập SSO! Đang tự động bấm nút 'Gmail'...")
+                        gmail_btn = page.locator("button.gmail").or_(page.locator("text=/Gmail/i")).first
+                        gmail_btn.wait_for(timeout=4000)
+                        gmail_btn.click()
+                    except Exception:
+                        pass
+
+                    # Chọn tài khoản Google nếu có danh sách tài khoản đã lưu
+                    try:
+                        page.wait_for_selector("[data-email]", timeout=5000)
+                        email_el = page.locator("[data-email]").first
+                        print(f"🔄 Đang tự động chọn tài khoản: {email_el.get_attribute('data-email')}...")
+                        email_el.click()
+                    except Exception:
+                        pass
+
+                # Nếu ở chế độ headless mà Google yêu cầu nhập mật khẩu/xác thực 2FA
+                if headless and "accounts.google.com" in page.url:
+                    browser.close()
+                    return "NEED_HEADED"
+
+                # Chờ cho đến khi chuyển về trang ERP USTH và có cookie 'token'
+                timeout_s = 90 if not headless else 10
+                start_time = time.time()
+                cookies_dict = {}
+                while time.time() - start_time < timeout_s:
+                    cookies_list = browser.cookies(["https://erp.usth.edu.vn"])
+                    cookies_dict = {c['name']: c['value'] for c in cookies_list}
+                    if cookies_dict.get("token"):
+                        break
+                    page.wait_for_timeout(1000)
+
+                browser.close()
+                if cookies_dict.get("token"):
+                    return cookies_dict
+                return None
+        except Exception as e:
+            print(f"⚠️ Quá trình tự động đăng nhập gặp lỗi: {e}")
+            return None
+
+    # Thử làm mới ngầm trước (headless=True)
+    res = _attempt_sso(headless=True)
+    if isinstance(res, dict) and res.get("token"):
+        return res
+
+    # Nếu Google yêu cầu xác thực hoặc headless không thành công, mở cửa sổ trình duyệt để người dùng thao tác
+    if interactive:
+        print("🔑 Google yêu cầu nhập mật khẩu hoặc xác thực 2 bước (2FA).")
+        print("🌐 Đang mở cửa sổ trình duyệt để bạn hoàn tất đăng nhập...")
+        print("👉 Vui lòng đăng nhập trên cửa sổ trình duyệt vừa mở...")
+        res = _attempt_sso(headless=False)
+        if isinstance(res, dict) and res.get("token"):
+            return res
+
+    return None
 
 
 def fetch_timetable(from_time: int, to_time: int, semester: str, weeks: list, auto_retry: bool = True):
     """Gửi request lấy thời khóa biểu bằng requests với payload đã mã hóa."""
     cookies = get_cookies()
     
+    # Kiểm tra trước xem có cookie token hợp lệ không
+    if not cookies.get("token") or cookies.get("token") == "YOUR_TOKEN_HERE":
+        if auto_retry and os.path.exists("./usth_profile"):
+            print("⚠️ Chưa tìm thấy cookie 'token' hợp lệ. Đang tự động đăng nhập/làm mới session...")
+            refreshed_cookies = refresh_session_cookies()
+            if refreshed_cookies and refreshed_cookies.get("token"):
+                cookies = refreshed_cookies
+            else:
+                print("❌ Không thể lấy token đăng nhập.")
+                print("👉 Vui lòng chạy lại 'python playwright_get.py' để đăng nhập lại tài khoản.")
+                return None
+        else:
+            print("❌ Chưa cấu hình cookie 'token'. Vui lòng cấu hình token hoặc dùng browser profile.")
+            return None
+
     body = {
         "fromTime": from_time,
         "toTime": to_time,
@@ -157,10 +238,11 @@ def fetch_timetable(from_time: int, to_time: int, semester: str, weeks: list, au
         if response.status_code == 401 and auto_retry and os.path.exists("./usth_profile"):
             print("🔄 Phát hiện Token/Session hết hạn. Đang tự động làm mới session qua trình duyệt...")
             refreshed_cookies = refresh_session_cookies()
-            if refreshed_cookies:
+            if refreshed_cookies and refreshed_cookies.get("token"):
                 print("✅ Đã làm mới session thành công. Đang thử gửi lại request...")
                 return fetch_timetable(from_time, to_time, semester, weeks, auto_retry=False)
             else:
+                print("❌ Không thể tự động làm mới session (chưa lấy được cookie 'token').")
                 print("👉 Vui lòng chạy lại 'python playwright_get.py' để đăng nhập lại tài khoản.")
         return None
     

@@ -1,7 +1,16 @@
+import sys
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 import json
 import time
+from requests_get import decrypt_payload
+
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
 
 # Đường dẫn trang web và API mục tiêu
 PAGE_URL = "https://erp.usth.edu.vn/students/learn/timetable"
@@ -10,6 +19,17 @@ API_ENDPOINT = "query-student-timetable-in-range"
 def print_timetable_data():
     with open("timetable.json", "r", encoding="utf-8") as f:
         calendar_data = json.load(f)
+
+    # Nếu dữ liệu còn bị mã hóa dạng {"payload": "..."}, giải mã trước khi hiển thị
+    if isinstance(calendar_data, dict) and "payload" in calendar_data:
+        calendar_data = decrypt_payload(calendar_data["payload"])
+
+    if not isinstance(calendar_data, list):
+        print("Không có dữ liệu thời khóa biểu hợp lệ để hiển thị.")
+        return
+
+    print(f"\n✅ Lấy thành công dữ liệu ({len(calendar_data)} môn học / lớp).")
+
     for course in calendar_data:
         course_name = course.get('courseName') or 'Không xác định'
         schedules = course.get('_calendars', [])
@@ -45,21 +65,11 @@ def get_timetable_data():
 
         print("⏳ Đang chờ dữ liệu...")
         
-        #auto sign in
+        # Tự động đăng nhập qua Gmail SSO
         try:
-            #wait 2 sec for "Đăng nhập" button to appear
-            page.wait_for_selector("text=/Đăng nhập/i", timeout=2000)
-            print("🔄 Phát hiện trang đăng nhập! Đang tự động bấm đăng nhập...")
-            page.locator("text=/Đăng nhập/i").first.click()
-        except Exception:
-            pass
-        
-        try:
-
-            # Chờ 5 giây xem có nút chứa chữ "Google" không (ở trang đăng nhập của trường)
-            page.wait_for_selector("text=/Gmail/i", timeout=5000)
-            print("🔄 Phát hiện trang đăng nhập! Đang tự động bấm chọn đăng nhập 'Google'...")
-            page.locator("text=/Gmail/i").first.click()
+            page.wait_for_selector("button.gmail, text=/Gmail/i", timeout=4000)
+            print("🔄 Phát hiện trang đăng nhập SSO! Đang tự động bấm chọn đăng nhập 'Gmail'...")
+            page.locator("button.gmail").or_(page.locator("text=/Gmail/i")).first.click()
                 
             page.wait_for_selector("[data-email]", timeout=10000)
             email_el = page.locator("[data-email]").first
@@ -68,6 +78,8 @@ def get_timetable_data():
             email_el.click()
         except Exception:
             pass
+
+        print("👉 Nếu trình duyệt yêu cầu nhập mật khẩu/xác thực 2FA của Google, vui lòng hoàn tất trên cửa sổ trình duyệt...")
 
         print("👉 Đang chờ bắt API dữ liệu (Chờ tối đa 1 phút)...")
 
@@ -88,6 +100,8 @@ def get_timetable_data():
             print("Gợi ý: Nếu trang web đã load xong mà không có dữ liệu, hãy thử bấm chọn lại 'Kỳ học' hoặc 'Tuần' trên giao diện để kích hoạt request POST.")
 
         if timetable_data:
+            if isinstance(timetable_data, dict) and "payload" in timetable_data:
+                timetable_data = decrypt_payload(timetable_data["payload"])
             with open("timetable.json", "w", encoding="utf-8") as f:
                 json.dump(timetable_data, f, ensure_ascii=False, indent=4)
             print("Đã lưu toàn bộ dữ liệu vào file 'timetable.json' trong cùng thư mục.")
